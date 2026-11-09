@@ -1,0 +1,13 @@
+# Ignore generated data
+*.csv
+*.db
+*.log
+*.exe
+*.zip
+
+# Ignore Python virtual environment
+venv/
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
