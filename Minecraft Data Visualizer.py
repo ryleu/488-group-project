@@ -1,9 +1,14 @@
+import os
 import sqlite3
+import sys
+from pathlib import Path
+
 import pandas as pd
 from flask import Flask, jsonify, render_template_string
 
+DB_PATH = Path(__file__).resolve().parent / "data" / "minecraft_data.db"
+
 app = Flask(__name__)
-DB_PATH = "minecraft_data.db"
 
 def get_db_connection():
     return sqlite3.connect(DB_PATH)
@@ -264,5 +269,13 @@ def index():
     return render_template_string(html_template)
 
 if __name__ == '__main__':
+    if not DB_PATH.exists():
+        print(f"Database not found: {DB_PATH}")
+        sys.exit(1)
+
+    port = int(os.environ.get("MC_PORT", "5000"))
+
     print("Starting Big Data Visualizer...")
-    app.run(debug=True, port=5000)
+    print(f"Using database: {DB_PATH}")
+    print(f"Open http://127.0.0.1:{port}")
+    app.run(debug=True, port=port)

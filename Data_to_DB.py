@@ -1,14 +1,27 @@
 import sqlite3
 import csv
+import sys
 import time
-import os
+from pathlib import Path
 
-DB_PATH = "minecraft_data.db"
+DATA_DIR = Path(__file__).resolve().parent / "data"
+DB_PATH = DATA_DIR / "minecraft_data.db"
+SPAWN_CSV = DATA_DIR / "spawn_chunk_biomes.csv"
+RANDOM_CSV = DATA_DIR / "random_chunk_biomes.csv"
+
+missing = [p for p in (SPAWN_CSV, RANDOM_CSV) if not p.exists()]
+if missing:
+    print("Missing input CSVs:")
+    for p in missing:
+        print(f"  - {p}")
+    sys.exit(1)
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Delete the old database file if it exists to guarantee a clean slate
-if os.path.exists(DB_PATH):
+if DB_PATH.exists():
     print(f"Deleting old database: {DB_PATH}")
-    os.remove(DB_PATH)
+    DB_PATH.unlink()
 
 print("Creating fresh database...")
 conn = sqlite3.connect(DB_PATH)
@@ -50,8 +63,8 @@ def load_csv(filename, table_name, has_spawn_cols):
                 
     print(f"Done! Took {time.time() - start:.2f} seconds.")
 
-load_csv("spawn_chunk_biomes.csv", "spawn_chunks", True)
-load_csv("random_chunk_biomes.csv", "random_chunks", False)
+load_csv(SPAWN_CSV, "spawn_chunks", True)
+load_csv(RANDOM_CSV, "random_chunks", False)
 
 conn.commit()
 conn.close()

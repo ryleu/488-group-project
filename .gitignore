@@ -1,13 +1,27 @@
-# Ignore generated data
+# Generated data
+data/
 *.csv
 *.db
 *.log
+
+# Build output
+build/
 *.exe
+*.o
+*.a
 *.zip
 
-# Ignore Python virtual environment
-venv/
+# Nix
+result
+result-*
+.direnv/
 
-# Ignore OS files
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# OS files
 .DS_Store
 Thumbs.db

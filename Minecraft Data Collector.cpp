@@ -23,12 +23,10 @@ extern "C" {
 constexpr int MC_VERSION = MC_1_21;
 constexpr int SPAWN_CHUNK_RADIUS = 9;
 
-// EXACT SEED LIMIT
-constexpr int MAX_SEEDS = 5000; 
+// Default seed limit (override with argv[1], e.g. "./spawn_biomes 50")
+constexpr int DEFAULT_MAX_SEEDS = 5000;
 
-const std::string OUTPUT_DIR = "C:/Users/istop/Documents/C488 Final/";
-const std::string OUTPUT_SPAWN_CSV = OUTPUT_DIR + "spawn_chunk_biomes.csv";
-const std::string OUTPUT_RAND_CSV = OUTPUT_DIR + "random_chunk_biomes.csv";
+const std::string OUTPUT_DIR = "data";
 
 // Thread safety
 std::mutex file_mutex;
@@ -97,36 +95,57 @@ void analyze_seed(uint64_t seed, std::string& out_spawn_csv, std::string& out_ra
     out_rand_csv = rand_ss.str();
 }
 
-int main() {
-    std::error_code ec;
-    std::filesystem::create_directories(OUTPUT_DIR, ec);
+int main(int argc, char** argv) {
+    int max_seeds = DEFAULT_MAX_SEEDS;
+    if (argc > 1) {
+        try {
+            max_seeds = std::stoi(argv[1]);
+        } catch (const std::exception&) {
+            std::cerr << "Invalid seed count: " << argv[1] << "\n";
+            return 1;
+        }
+        if (max_seeds <= 0) {
+            std::cerr << "Seed count must be positive (got " << max_seeds << ").\n";
+            return 1;
+        }
+    }
 
-    std::ofstream csv_spawn(OUTPUT_SPAWN_CSV);
-    std::ofstream csv_rand(OUTPUT_RAND_CSV);
+    const std::filesystem::path output_dir = OUTPUT_DIR;
+    const std::filesystem::path spawn_csv_path = output_dir / "spawn_chunk_biomes.csv";
+    const std::filesystem::path rand_csv_path = output_dir / "random_chunk_biomes.csv";
+
+    std::error_code ec;
+    std::filesystem::create_directories(output_dir, ec);
+
+    std::ofstream csv_spawn(spawn_csv_path);
+    std::ofstream csv_rand(rand_csv_path);
 
     if (!csv_spawn.is_open() || !csv_rand.is_open()) {
-        std::cerr << "Could not open output files. Check permissions.\n";
+        std::cerr << "Could not open output files in \"" << output_dir.string()
+                  << "\". Check permissions.\n";
         return 1;
     }
+
+    std::cout << "Writing CSVs to: " << std::filesystem::absolute(output_dir).string() << "\n";
 
     csv_spawn << "seed,spawn_x,spawn_z,chunk_x,chunk_z,biome_id,biome_name\n";
     csv_rand << "seed,chunk_x,chunk_z,biome_id,biome_name\n";
 
-    std::vector<uint64_t> seeds(MAX_SEEDS);
+    std::vector<uint64_t> seeds(max_seeds);
     std::random_device rd;
     std::mt19937_64 rng(rd());
     std::uniform_int_distribution<uint64_t> dist;
-    for (int i = 0; i < MAX_SEEDS; ++i) {
+    for (int i = 0; i < max_seeds; ++i) {
         seeds[i] = dist(rng);
     }
 
-    std::cout << "Analyzing " << MAX_SEEDS << " seeds (Spawn vs Random)...\n\n";
+    std::cout << "Analyzing " << max_seeds << " seeds (Spawn vs Random)...\n\n";
 
     auto start = std::chrono::steady_clock::now();
     auto last_flush = std::chrono::steady_clock::now();
 
     #pragma omp parallel for schedule(dynamic, 10)
-    for (int i = 0; i < MAX_SEEDS; ++i) {
+    for (int i = 0; i < max_seeds; ++i) {
         std::string local_spawn, local_rand;
         int rows = 0;
         analyze_seed(seeds[i], local_spawn, local_rand, rows);
@@ -146,10 +165,10 @@ int main() {
         }
 
         int current = ++completed_seeds;
-        if (current % 1000 == 0 || current == MAX_SEEDS) {
+        if (current % 1000 == 0 || current == max_seeds) {
             std::lock_guard<std::mutex> lock(io_mutex);
-            std::cout << "Seeds Processed: " << current << " / " << MAX_SEEDS 
-                      << " (" << (current * 100 / MAX_SEEDS) << "%) | "
+            std::cout << "Seeds Processed: " << current << " / " << max_seeds 
+                      << " (" << (current * 100 / max_seeds) << "%) | "
                       << total_rows_written.load() << " rows written.\r" << std::flush;
         }
     }

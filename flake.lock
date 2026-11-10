@@ -1,0 +1,44 @@
+{
+  "nodes": {
+    "cubiomes": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1731241291,
+        "narHash": "sha256-hIf6nhmfHqzrx40glWQ9FNHo9lYYT4M5GETktORaqDs=",
+        "owner": "Cubitect",
+        "repo": "cubiomes",
+        "rev": "e61f90580cbdd883214a8054670dacae655e59c0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Cubitect",
+        "repo": "cubiomes",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1794042290,
+        "narHash": "sha256-ziZn2PvCJE5JEEpqTdxXwJpPB+L3YqoCpTAMCzyaP3U=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "f4a03c008967841f2a0b3cb7c436fc6fc31671f6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "cubiomes": "cubiomes",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
