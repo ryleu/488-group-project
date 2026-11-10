@@ -9,6 +9,8 @@ from flask import Flask, jsonify, render_template_string
 DB_PATH = Path(__file__).resolve().parent / "data" / "minecraft_data.db"
 
 app = Flask(__name__)
+# Keep JSON in insertion order so the dashboard columns follow FEATURES.
+app.json.sort_keys = False
 
 def get_db_connection():
     return sqlite3.connect(DB_PATH)
@@ -122,6 +124,73 @@ def tree_heaviness():
         'z': pivot.values.tolist()
     })
 
+# (column, label, histogram bin width in blocks)
+FEATURES = [
+    ("dist_tree_biome", "Nearest Tree-Bearing Biome", 32),
+    ("dist_passive_structure", "Nearest Passive Structure", 64),
+    ("dist_hostile_structure", "Nearest Hostile Structure", 64),
+]
+
+@app.route('/api/feature-distributions')
+def feature_distributions():
+    """Normalised per-feature histograms, binned in SQL to stay cheap."""
+    conn = get_db_connection()
+    out = {}
+    for col, label, binw in FEATURES:
+        entry = {'label': label, 'binw': binw}
+        sources = (("spawn_chunks", "", "spawn"),
+                   ("random_chunks", "WHERE area_kind = 'control'", "control"),
+                   ("random_chunks", "WHERE area_kind = 'control_land'", "control_land"))
+        for table, where, key in sources:
+            clause = f"{where} AND" if where else "WHERE"
+            df = pd.read_sql_query(f"""
+                SELECT CAST({col} / {binw} AS INTEGER) AS bin, COUNT(*) AS n
+                FROM {table} {clause} {col} IS NOT NULL
+                GROUP BY bin ORDER BY bin
+            """, conn)
+            total = int(df['n'].sum())
+            entry[key] = {
+                'x': ((df['bin'] * binw) + binw / 2).tolist(),
+                'y': (df['n'] / total).tolist() if total else [],
+            }
+        out[col] = entry
+    conn.close()
+    return jsonify(out)
+
+@app.route('/api/feature-deltas')
+def feature_deltas():
+    """Per-seed spawn mean minus that seed's control mean, for both control
+    groups. control_land is the one that tests the hypothesis -- the uniform
+    control is ~43% water, so against it you mostly measure land-vs-ocean."""
+    conn = get_db_connection()
+    agg = ", ".join(f"AVG({col}) AS {col}" for col, _, _ in FEATURES)
+    spawn = pd.read_sql_query(f"SELECT seed, {agg} FROM spawn_chunks GROUP BY seed", conn)
+    controls = {
+        kind: pd.read_sql_query(
+            f"SELECT seed, {agg} FROM random_chunks WHERE area_kind = '{kind}' GROUP BY seed",
+            conn)
+        for kind in ("control", "control_land")
+    }
+    conn.close()
+
+    out = {}
+    for col, label, _ in FEATURES:
+        entry = {'label': label}
+        for kind, df in controls.items():
+            merged = spawn.merge(df, on='seed', suffixes=('_spawn', '_control'))
+            delta = (merged[f'{col}_spawn'] - merged[f'{col}_control']).dropna()
+            entry[kind] = {
+                'values': delta.tolist(),
+                'mean': float(delta.mean()) if len(delta) else 0.0,
+                'median': float(delta.median()) if len(delta) else 0.0,
+                'closer_at_spawn': float((delta < 0).mean()) if len(delta) else 0.0,
+                'spawn_mean': float(merged[f'{col}_spawn'].mean()),
+                'control_mean': float(merged[f'{col}_control'].mean()),
+                'n': int(len(delta)),
+            }
+        out[col] = entry
+    return jsonify(out)
+
 @app.route('/')
 def index():
     html_template = """
@@ -163,6 +232,11 @@ def index():
             .rank { font-weight: bold; color: #888; margin-right: 15px; width: 30px; }
             .biome-name { flex-grow: 1; text-transform: capitalize; letter-spacing: 1px; }
             .count { font-weight: bold; color: #4CAF50; font-family: monospace; font-size: 1.1em; }
+            .stats-row { display: flex; gap: 15px; margin-top: 15px; flex-wrap: wrap; }
+            .stat { flex: 1 1 260px; background-color: #2a2a2a; border-radius: 6px; padding: 12px 15px; border-left: 4px solid #9C27B0; }
+            .stat .name { color: #bbb; font-size: 0.95em; margin-bottom: 6px; }
+            .stat .val { font-family: monospace; font-size: 1.25em; font-weight: bold; }
+            .stat .sub { color: #888; font-size: 0.85em; margin-top: 4px; font-family: monospace; }
         </style>
     </head>
     <body>
@@ -185,6 +259,18 @@ def index():
             <div class="card">
                 <h2>Biome Diversity per Spawn Area</h2>
                 <div id="histChart" class="chart-container"></div>
+            </div>
+
+
+            <div class="card full-width">
+                <h2>ML Feature Distributions: Spawn Area vs Control Areas</h2>
+                <div id="featureDistChart" class="chart-container"></div>
+            </div>
+
+            <div class="card full-width">
+                <h2>Per-Seed Paired Delta (Spawn Area &minus; Control Areas, same world)</h2>
+                <div id="featureDeltaChart" class="chart-container"></div>
+                <div id="featureDeltaStats" class="stats-row"></div>
             </div>
 
             <!-- Restored: Full width chunk heatmap -->
@@ -247,6 +333,73 @@ def index():
                     xaxis: { title: 'Number of Unique Biomes at Spawn', type: 'category' }, 
                     yaxis: { title: 'Number of Seeds' } 
                 });
+            });
+
+            fetch('/api/feature-distributions').then(res => res.json()).then(data => {
+                const cols = Object.keys(data);
+                const traces = [];
+                const series = [
+                    ['spawn',        'Spawn',               '#4CAF50'],
+                    ['control',      'Control (uniform)',   '#2196F3'],
+                    ['control_land', 'Control (land only)', '#FF9800'],
+                ];
+                cols.forEach((col, i) => {
+                    const d = data[col];
+                    series.forEach(([key, name, colour]) => {
+                        if (!d[key]) return;
+                        traces.push({ x: d[key].x, y: d[key].y, name: name, type: 'scatter',
+                                      mode: 'lines', line: { color: colour, width: 2 },
+                                      xaxis: 'x' + (i + 1), yaxis: 'y' + (i + 1),
+                                      showlegend: i === 0, legendgroup: key });
+                    });
+                });
+                const layout = { ...layoutTemplate, grid: { rows: 1, columns: cols.length, pattern: 'independent' } };
+                cols.forEach((col, i) => {
+                    layout['xaxis' + (i + 1)] = { title: data[col].label + ' (blocks)' };
+                    layout['yaxis' + (i + 1)] = { title: i === 0 ? 'Share of chunks' : '' };
+                });
+                Plotly.newPlot('featureDistChart', traces, layout);
+            });
+
+            fetch('/api/feature-deltas').then(res => res.json()).then(data => {
+                const cols = Object.keys(data);
+                const kinds = [
+                    ['control',      'vs uniform control', '#2196F3'],
+                    ['control_land', 'vs land control',    '#FF9800'],
+                ];
+                const traces = [];
+                cols.forEach((col, i) => {
+                    kinds.forEach(([key, name, colour]) => {
+                        if (!data[col][key]) return;
+                        traces.push({
+                            x: data[col][key].values, name: name, type: 'histogram',
+                            marker: { color: colour }, opacity: 0.6,
+                            xaxis: 'x' + (i + 1), yaxis: 'y' + (i + 1),
+                            showlegend: i === 0, legendgroup: key
+                        });
+                    });
+                });
+                const layout = { ...layoutTemplate, barmode: 'overlay',
+                                 grid: { rows: 1, columns: cols.length, pattern: 'independent' } };
+                cols.forEach((col, i) => {
+                    layout['xaxis' + (i + 1)] = { title: data[col].label + ' \u0394 (blocks)', zeroline: true, zerolinecolor: '#fff', zerolinewidth: 2 };
+                    layout['yaxis' + (i + 1)] = { title: i === 0 ? 'Number of seeds' : '' };
+                });
+                Plotly.newPlot('featureDeltaChart', traces, layout);
+
+                const box = document.getElementById('featureDeltaStats');
+                box.innerHTML = cols.map(col => {
+                    const d = data[col];
+                    const rows = kinds.map(([key, name]) => {
+                        const k = d[key];
+                        if (!k) return '';
+                        const sign = k.mean < 0 ? '' : '+';
+                        const colour = k.mean < 0 ? '#4CAF50' : '#E91E63';
+                        const verdict = k.mean < 0 ? 'closer at spawn' : 'farther at spawn';
+                        return `<div class="sub" style="color:${colour}">${name}: ${sign}${k.mean.toFixed(1)} blocks &mdash; ${verdict} (${(k.closer_at_spawn * 100).toFixed(0)}% of ${k.n.toLocaleString()} seeds)</div>`;
+                    }).join('');
+                    return `<div class="stat"><div class="name">${d.label}</div>${rows}</div>`;
+                }).join('');
             });
 
             fetch('/api/tree-heaviness').then(res => res.json()).then(data => {
