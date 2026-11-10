@@ -3,6 +3,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, render_template_string
 
@@ -15,21 +16,30 @@ app.json.sort_keys = False
 def get_db_connection():
     return sqlite3.connect(DB_PATH)
 
-TREE_HEAVY = [
-    'forest', 'flower_forest', 'birch_forest', 'dark_forest', 
-    'jungle', 'bamboo_jungle', 'taiga', 'swamp', 
-    'mangrove_swamp', 'wooded_badlands', 'old_growth_birch_forest',
-    'snowy_taiga'
+# Must stay in sync with TREE_BIOMES[] / WATER_BIOMES[] in the collector.
+TREE_BEARING = [
+    'forest', 'flower_forest', 'birch_forest', 'old_growth_birch_forest',
+    'dark_forest', 'pale_garden',
+    'taiga', 'snowy_taiga', 'old_growth_pine_taiga', 'old_growth_spruce_taiga',
+    'jungle', 'sparse_jungle', 'bamboo_jungle',
+    'swamp', 'mangrove_swamp',
+    'cherry_grove', 'wooded_badlands', 'windswept_forest', 'grove',
+    'savanna', 'savanna_plateau', 'windswept_savanna',
 ]
+# Land the collector excludes from TREE_BIOMES[], plus the other treeless land.
 TREE_LIGHT = [
-    'plains', 'sunflower_plains', 'savanna', 'desert', 
-    'badlands', 'snowy_tundra', 'ice_spikes', 'mushroom_fields',
-    'snowy_plains'
+    'plains', 'sunflower_plains', 'meadow',
+    'windswept_hills', 'windswept_gravelly_hills',
+    'desert', 'badlands', 'eroded_badlands',
+    'snowy_plains', 'ice_spikes', 'snowy_slopes',
+    'jagged_peaks', 'frozen_peaks', 'stony_peaks',
+    'mushroom_fields',
 ]
 WATERMASS = [
-    'river', 'frozen_river', 'ocean', 'deep_ocean', 'warm_ocean', 'lukewarm_ocean', 
-    'deep_lukewarm_ocean', 'cold_ocean', 'deep_cold_ocean', 'frozen_ocean', 
-    'deep_frozen_ocean', 'beach', 'snowy_beach', 'stony_shore'
+    'ocean', 'deep_ocean', 'warm_ocean', 'lukewarm_ocean', 'deep_lukewarm_ocean',
+    'cold_ocean', 'deep_cold_ocean', 'frozen_ocean', 'deep_frozen_ocean',
+    'river', 'frozen_river', 'beach', 'snowy_beach', 'stony_shore',
+    'mushroom_field_shore',
 ]
 
 @app.route('/api/top-biomes')
@@ -44,7 +54,8 @@ def top_biomes():
 @app.route('/api/spawn-heatmap')
 def spawn_heatmap():
     conn = get_db_connection()
-    query = "SELECT DISTINCT spawn_x, spawn_z FROM spawn_chunks"
+    # One row per seed. DISTINCT also collapsed seeds sharing a spawn point.
+    query = "SELECT spawn_x, spawn_z FROM spawn_chunks GROUP BY seed"
     df = pd.read_sql_query(query, conn)
     conn.close()
     return jsonify(df.to_dict(orient='records'))
@@ -63,66 +74,82 @@ def diversity():
     counts.columns = ['unique_biomes', 'seed_count']
     return jsonify(counts.to_dict(orient='records'))
 
+CATEGORIES = ['Tree-Bearing', 'Tree-Light', 'Watermass', 'Barren/Other']
+
+# (table, WHERE clause, json key, display label)
+GROUPS = (
+    ("spawn_chunks",  "",                              "spawn",        "Spawn"),
+    ("random_chunks", "WHERE area_kind = 'control'",      "control",      "Control (uniform)"),
+    ("random_chunks", "WHERE area_kind = 'control_land'", "control_land", "Control (land only)"),
+)
+
+
+def categorize(biome):
+    if pd.isna(biome): return 'Barren/Other'
+    clean = str(biome).lower().replace('minecraft:', '').strip()
+    if clean in TREE_BEARING: return 'Tree-Bearing'
+    if clean in TREE_LIGHT: return 'Tree-Light'
+    if clean in WATERMASS: return 'Watermass'
+    return 'Barren/Other'
+
+
 @app.route('/api/playability')
 def playability():
+    """Category shares, split by control group. Counts would be meaningless:
+    random_chunks holds 6 areas per seed against spawn's 1."""
     conn = get_db_connection()
-    df_spawn = pd.read_sql_query("SELECT biome_name, COUNT(*) as count FROM spawn_chunks GROUP BY biome_name", conn)
-    df_rand = pd.read_sql_query("SELECT biome_name, COUNT(*) as count FROM random_chunks GROUP BY biome_name", conn)
+    out = {'categories': CATEGORIES, 'labels': {}, 'totals': {}}
+    for table, where, key, label in GROUPS:
+        df = pd.read_sql_query(
+            f"SELECT biome_name, COUNT(*) AS count FROM {table} {where} GROUP BY biome_name",
+            conn)
+        df['category'] = df['biome_name'].apply(categorize)
+        counts = df.groupby('category')['count'].sum()
+        total = int(counts.sum())
+        out[key] = [float(counts.get(c, 0)) / total if total else 0.0 for c in CATEGORIES]
+        out['labels'][key] = label
+        out['totals'][key] = total
     conn.close()
-    
-    def categorize(df):
-        def get_cat(biome):
-            if pd.isna(biome): return 'Barren/Other'
-            clean = str(biome).lower().replace('minecraft:', '').strip()
-            if clean in TREE_HEAVY: return 'Tree-Heavy'
-            if clean in TREE_LIGHT: return 'Tree-Light'
-            if clean in WATERMASS: return 'Watermass'
-            return 'Barren/Other'
-        df['category'] = df['biome_name'].apply(get_cat)
-        return df.groupby('category')['count'].sum().reset_index()
-        
-    spawn_res = categorize(df_spawn)
-    rand_res = categorize(df_rand)
-    
-    categories = ['Tree-Heavy', 'Tree-Light', 'Watermass', 'Barren/Other']
-    spawn_counts = {row['category']: row['count'] for _, row in spawn_res.iterrows()}
-    rand_counts = {row['category']: row['count'] for _, row in rand_res.iterrows()}
-    
+    return jsonify(out)
+
+@app.route('/api/radial-profile')
+def radial_profile():
+    """Water share and tree-share-among-land by ring distance from the area
+    centre, for spawn and both controls. See README dashboard feature 5."""
+    conn = get_db_connection()
+    spawn = pd.read_sql_query(
+        "SELECT spawn_x AS cx, spawn_z AS cz, chunk_x, chunk_z, biome_name FROM spawn_chunks",
+        conn)
+    rand = pd.read_sql_query(
+        "SELECT area_kind, center_x AS cx, center_z AS cz, chunk_x, chunk_z, biome_name "
+        "FROM random_chunks", conn)
+    conn.close()
+
+    def profile(df):
+        # Chebyshev ring index: 0 is the centre chunk, 9 the edge of the 19x19.
+        ring = np.maximum((df['chunk_x'] - (df['cx'] // 16)).abs(),
+                          (df['chunk_z'] - (df['cz'] // 16)).abs())
+        # Categorise the ~50 distinct names once, not all 650k rows.
+        cat = df['biome_name'].map(
+            {b: categorize(b) for b in df['biome_name'].unique()})
+        d = pd.DataFrame({'ring': ring, 'water': cat == 'Watermass'})
+        d['land'] = ~d['water']
+        # Among land only; over all chunks it just re-measures the water gradient.
+        d['tree_land'] = (cat == 'Tree-Bearing') & d['land']
+        g = d.groupby('ring')[['water', 'land', 'tree_land']].sum()
+        n = d.groupby('ring').size()
+        return {'ring': g.index.tolist(),
+                'water': (g['water'] / n).tolist(),
+                'tree_among_land': (g['tree_land'] / g['land']).tolist(),
+                'n': n.tolist()}
+
     return jsonify({
-        'categories': categories,
-        'spawn': [spawn_counts.get(c, 0) for c in categories],
-        'random': [rand_counts.get(c, 0) for c in categories]
+        'spawn': profile(spawn),
+        'control': profile(rand[rand['area_kind'] == 'control']),
+        'control_land': profile(rand[rand['area_kind'] == 'control_land']),
+        'labels': {k: v for _, _, k, v in GROUPS},
     })
 
-@app.route('/api/tree-heaviness')
-def tree_heaviness():
-    conn = get_db_connection()
-    query = "SELECT chunk_x, chunk_z, spawn_x, spawn_z, biome_name FROM spawn_chunks"
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    
-    # Calculate relative chunk coordinates (0,0 is the spawn chunk)
-    df['rel_x'] = df['chunk_x'] - (df['spawn_x'] // 16)
-    df['rel_z'] = df['chunk_z'] - (df['spawn_z'] // 16)
-    
-    def get_score(biome):
-        if pd.isna(biome): return 0.0
-        clean = str(biome).lower().replace('minecraft:', '').strip()
-        if clean in TREE_HEAVY: return 1.0
-        if clean in TREE_LIGHT: return 0.5
-        return 0.0
-        
-    df['score'] = df['biome_name'].apply(get_score)
-    
-    # Average score across all seeds for each relative coordinate
-    pivot = df.groupby(['rel_z', 'rel_x'])['score'].mean().unstack()
-    pivot = pivot.fillna(0.5).sort_index(ascending=False).sort_index(axis=1, ascending=True)
-    
-    return jsonify({
-        'x': pivot.columns.tolist(),
-        'y': pivot.index.tolist(),
-        'z': pivot.values.tolist()
-    })
 
 # (column, label, histogram bin width in blocks)
 FEATURES = [
@@ -247,7 +274,7 @@ def index():
             </div>
             
             <div class="card">
-                <h2>Spawn vs Global Resource Distribution</h2>
+                <h2>Biome Category Share: Spawn vs Control Areas</h2>
                 <div id="playabilityChart" class="chart-container"></div>
             </div>
             
@@ -273,10 +300,23 @@ def index():
                 <div id="featureDeltaStats" class="stats-row"></div>
             </div>
 
-            <!-- Restored: Full width chunk heatmap -->
             <div class="card full-width">
-                <h2>Average Spawn Area Tree-Heaviness (1 Pixel = 1 Chunk)</h2>
-                <div id="treeHeatmapChart" class="chart-container"></div>
+                <h2>Water and Tree Share vs Distance from Area Centre</h2>
+                <div id="radialChart" class="chart-container"></div>
+                <div class="stats-row">
+                    <div class="stat" style="border-left-color:#2196F3">
+                        <div class="name">What the left panel shows</div>
+                        <div class="sub">Spawn water share climbs from the centre chunk to the grid
+                        edge at roughly twice the land control's rate. Spawn areas are genuinely
+                        more coastal, not merely on land.</div>
+                    </div>
+                    <div class="stat" style="border-left-color:#4CAF50">
+                        <div class="name">What the right panel shows</div>
+                        <div class="sub">Among land chunks only, tree-bearing share is flat across
+                        every ring and sits on top of the land control. No tree bias at spawn &mdash;
+                        the apparent one is the water gradient on the left.</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -300,10 +340,21 @@ def index():
             });
 
             fetch('/api/playability').then(res => res.json()).then(data => {
-                const traceSpawn = { x: data.categories, y: data.spawn, name: 'Spawn Chunks', type: 'bar', marker: { color: '#4CAF50' } };
-                const traceRandom = { x: data.categories, y: data.random, name: 'Random World', type: 'bar', marker: { color: '#2196F3' } };
-                Plotly.newPlot('playabilityChart', [traceSpawn, traceRandom], {
-                    ...layoutTemplate, barmode: 'group', yaxis: { title: 'Number of Chunks' }
+                const series = [
+                    ['spawn',        '#4CAF50'],
+                    ['control',      '#2196F3'],
+                    ['control_land', '#FF9800'],
+                ];
+                const traces = series.map(([key, colour]) => ({
+                    x: data.categories, y: data[key], type: 'bar',
+                    name: `${data.labels[key]} (n=${Number(data.totals[key]).toLocaleString()})`,
+                    marker: { color: colour },
+                    hovertemplate: '%{y:.1%}<extra>%{fullData.name}</extra>'
+                }));
+                Plotly.newPlot('playabilityChart', traces, {
+                    ...layoutTemplate, barmode: 'group',
+                    legend: { orientation: 'h', y: 1.12 },
+                    yaxis: { title: 'Share of chunks', tickformat: '.0%' }
                 });
             });
 
@@ -313,8 +364,9 @@ def index():
                 const y = data.map(d => Number(d.spawn_z));
                 const trace = { 
                     x: x, y: y, type: 'histogram2d',
-                    colorscale: [[0.0, '#00CC00'], [0.05, '#88FF00'], [0.15, '#FFFF00'], [0.35, '#FF8800'], [1.0, '#FF0000']],
-                    zmin: 0, zmax: 80, colorbar: { title: 'Seeds' }, nbinsx: 100, nbinsy: 100 
+                    // 0 maps to the background; most bins are empty.
+                    colorscale: [[0.0, '#1e1e1e'], [0.01, '#00CC00'], [0.08, '#FFFF00'], [0.3, '#FF8800'], [1.0, '#FF0000']],
+                    colorbar: { title: 'Seeds' }, nbinsx: 100, nbinsy: 100 
                 };
                 Plotly.newPlot('heatmapChart', [trace], {
                     ...layoutTemplate,
@@ -402,17 +454,41 @@ def index():
                 }).join('');
             });
 
-            fetch('/api/tree-heaviness').then(res => res.json()).then(data => {
-                if (!data.z || data.z.length === 0) return;
-                const trace = {
-                    x: data.x, y: data.y, z: data.z, type: 'heatmap',
-                    colorscale: [[0.0, '#2196F3'], [0.5, '#FFC107'], [1.0, '#4CAF50']],
-                    zmin: 0, zmax: 1, colorbar: { title: 'Avg Score', tickvals: [0, 0.5, 1], ticktext: ['Water', 'Light', 'Heavy'] }
-                };
-                Plotly.newPlot('treeHeatmapChart', [trace], {
+            fetch('/api/radial-profile').then(res => res.json()).then(data => {
+                const series = [
+                    ['spawn',        '#4CAF50'],
+                    ['control',      '#2196F3'],
+                    ['control_land', '#FF9800'],
+                ];
+                const panels = [
+                    ['water',           'Water share',                 'x1', 'y1'],
+                    ['tree_among_land', 'Tree-bearing share, land only','x2', 'y2'],
+                ];
+                const traces = [];
+                panels.forEach(([field, _title, xa, ya], i) => {
+                    series.forEach(([key, colour]) => {
+                        const d = data[key];
+                        traces.push({
+                            x: d.ring, y: d[field], name: data.labels[key],
+                            type: 'scatter', mode: 'lines+markers',
+                            line: { color: colour, width: 2.5 },
+                            marker: { color: colour, size: 6 },
+                            xaxis: xa, yaxis: ya,
+                            showlegend: i === 0, legendgroup: key,
+                            hovertemplate: 'ring %{x}: %{y:.1%}<extra>%{fullData.name}</extra>'
+                        });
+                    });
+                });
+                // Full 0-100% on both: zooming the right panel would fake an effect.
+                const axis = { range: [0, 1], tickformat: '.0%' };
+                Plotly.newPlot('radialChart', traces, {
                     ...layoutTemplate,
-                    xaxis: { title: 'Relative Chunk X (0 = Spawn)', dtick: 2 },
-                    yaxis: { title: 'Relative Chunk Z', dtick: 2, scaleanchor: 'x', scaleratio: 1 }
+                    grid: { rows: 1, columns: 2, pattern: 'independent' },
+                    legend: { orientation: 'h', y: 1.12 },
+                    xaxis:  { title: 'Chunks from centre (0 = spawn chunk)', dtick: 1 },
+                    xaxis2: { title: 'Chunks from centre (0 = spawn chunk)', dtick: 1 },
+                    yaxis:  { ...axis, title: 'Water share' },
+                    yaxis2: { ...axis, title: 'Tree-bearing share among land' }
                 });
             });
         </script>

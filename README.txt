@@ -427,13 +427,27 @@ STEP 3: RUN THE VISUALIZER
 DASHBOARD FEATURES
 ================================================================================
 1. Top 15 Spawn Biomes: Ranks the most common biomes found in spawn chunks.
-2. Spawn vs Global Resource Distribution: Compares early-game playability 
-   categories (Tree-Heavy, Light, Water, Barren) between actual spawn points 
-   and randomly sampled chunks.
-3. Spawn Density Heatmap: Proves the spawn algorithm heavily clusters near (0,0).
+2. Biome Category Share: Spawn vs Control Areas: Compares early-game
+   playability categories (Tree-Bearing, Light, Water, Barren) across spawn,
+   the uniform control and the land control. Plots SHARES, not counts --
+   random_chunks holds 6 areas per seed against spawn's 1, so raw counts are 6x
+   and lump both control groups together. The category lists mirror TREE_BIOMES[]
+   and WATER_BIOMES[] in the collector, so savanna counts as tree-bearing in
+   both places.
+3. Spawn Density Heatmap: Proves the spawn algorithm heavily clusters near
+   (0,0). Counts one row per SEED -- the old SELECT DISTINCT collapsed seeds
+   that share a spawn point, which at 300 seeds discarded 157 of them.
 4. Biome Diversity: Histogram showing unique biomes per spawn area.
-5. Average Spawn Area Tree-Heaviness: A spatial 19x19 heatmap showing wood 
-   availability relative to the exact spawn point.
+5. Water and Tree Share vs Distance from Area Centre: Two line panels over
+   ring distance 0-9 from the area centre. LEFT, water share: spawn climbs
+   3.7% -> 34.1% from the centre chunk to the grid edge, against the land
+   control's 0% -> 19.5%. Spawn areas really are about twice as coastal.
+   RIGHT, tree-bearing share among LAND chunks only: flat at ~63% on every
+   ring and sitting on top of the land control's ~64%. That pair is the
+   finding -- there is no tree bias at spawn; what looks like one is the water
+   gradient on the left, and it vanishes once you condition on land.
+   (Replaces the old 19x19 tree-heaviness heatmap, which averaged the water
+   gradient and the tree share into one number per cell and showed neither.)
 6. ML Feature Distributions: Normalised histograms of all three distance 
    features, spawn areas vs control areas.
 7. Per-Seed Paired Delta: For each seed, its spawn-area mean minus its own 
