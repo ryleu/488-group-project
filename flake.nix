@@ -42,6 +42,8 @@
             flask
             pandas
             plotly
+            numpy
+            scikit-learn
           ]);
 
           # convenience

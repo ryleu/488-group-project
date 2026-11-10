@@ -3,7 +3,6 @@ import sqlite3
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, render_template_string
 
@@ -116,39 +115,37 @@ def playability():
 def radial_profile():
     """Water share and tree-share-among-land by ring distance from the area
     centre, for spawn and both controls. See README dashboard feature 5."""
+    # Aggregated in SQL: these tables are 12.6M rows at 5000 seeds.
+    water_ph = ",".join("?" * len(WATERMASS))
+    tree_ph = ",".join("?" * len(TREE_BEARING))
+
+    def profile(conn, table, cx, cz, where, params):
+        # Chebyshev ring: 0 = centre chunk, 9 = edge of the 19x19.
+        # Params bind in placeholder order: both IN lists precede the WHERE.
+        df = pd.read_sql_query(f"""
+            SELECT MAX(ABS(chunk_x - CAST(FLOOR({cx} / 16.0) AS INTEGER)),
+                       ABS(chunk_z - CAST(FLOOR({cz} / 16.0) AS INTEGER))) AS ring,
+                   COUNT(*) AS n,
+                   SUM(biome_name IN ({water_ph})) AS water,
+                   SUM(biome_name IN ({tree_ph})) AS tree
+            FROM {table} {where} GROUP BY ring ORDER BY ring
+        """, conn, params=[*WATERMASS, *TREE_BEARING, *params])
+        # TREE_BEARING and WATERMASS are disjoint, so every tree chunk is land.
+        land = df['n'] - df['water']
+        return {'ring': df['ring'].tolist(),
+                'water': (df['water'] / df['n']).tolist(),
+                'tree_among_land': (df['tree'] / land).tolist(),
+                'n': df['n'].tolist()}
+
     conn = get_db_connection()
-    spawn = pd.read_sql_query(
-        "SELECT spawn_x AS cx, spawn_z AS cz, chunk_x, chunk_z, biome_name FROM spawn_chunks",
-        conn)
-    rand = pd.read_sql_query(
-        "SELECT area_kind, center_x AS cx, center_z AS cz, chunk_x, chunk_z, biome_name "
-        "FROM random_chunks", conn)
+    out = {'labels': {k: v for _, _, k, v in GROUPS}}
+    for table, where, key, _ in GROUPS:
+        cx, cz = ("spawn_x", "spawn_z") if table == "spawn_chunks" else ("center_x", "center_z")
+        params = [where.split("'")[1]] if where else []
+        out[key] = profile(conn, table, cx, cz,
+                           "WHERE area_kind = ?" if where else "", params)
     conn.close()
-
-    def profile(df):
-        # Chebyshev ring index: 0 is the centre chunk, 9 the edge of the 19x19.
-        ring = np.maximum((df['chunk_x'] - (df['cx'] // 16)).abs(),
-                          (df['chunk_z'] - (df['cz'] // 16)).abs())
-        # Categorise the ~50 distinct names once, not all 650k rows.
-        cat = df['biome_name'].map(
-            {b: categorize(b) for b in df['biome_name'].unique()})
-        d = pd.DataFrame({'ring': ring, 'water': cat == 'Watermass'})
-        d['land'] = ~d['water']
-        # Among land only; over all chunks it just re-measures the water gradient.
-        d['tree_land'] = (cat == 'Tree-Bearing') & d['land']
-        g = d.groupby('ring')[['water', 'land', 'tree_land']].sum()
-        n = d.groupby('ring').size()
-        return {'ring': g.index.tolist(),
-                'water': (g['water'] / n).tolist(),
-                'tree_among_land': (g['tree_land'] / g['land']).tolist(),
-                'n': n.tolist()}
-
-    return jsonify({
-        'spawn': profile(spawn),
-        'control': profile(rand[rand['area_kind'] == 'control']),
-        'control_land': profile(rand[rand['area_kind'] == 'control_land']),
-        'labels': {k: v for _, _, k, v in GROUPS},
-    })
+    return jsonify(out)
 
 
 # (column, label, histogram bin width in blocks)

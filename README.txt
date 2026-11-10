@@ -55,7 +55,8 @@ STEP 1: COMPILE AND RUN THE C++ DATA COLLECTOR
    * It outputs three files: "spawn_chunk_biomes.csv" (per-chunk grid at spawn),
      "random_chunk_biomes.csv" (per-chunk grid at the control areas), and
      "seed_samples.csv" (4 point-level rows per seed -- the ML feature table).
-   * 5000 seeds takes ~6 minutes and writes ~2.8 GB.
+   * 5000 seeds takes ~7 minutes and writes ~2.9 GB (measured: 406 s,
+     12,635,000 grid rows + 35,000 sample rows, 16 threads).
 
 
 ================================================================================
@@ -233,7 +234,8 @@ nothing, where the fixed box left 7.8% of mansion distances NULL:
 
 Every distance column comes back fully populated. There are no NULLs to impute.
 
-COST: ~6 min and ~2.8 GB of CSV for 5000 seeds, plus a comparable database.
+COST: ~7 min and ~2.9 GB of CSV for 5000 seeds, plus a 3.8 GB database
+(Data_to_DB.py takes ~2 min to load it).
 (7 areas per seed rather than 4, since the land control group was added.)
 
 
@@ -301,20 +303,20 @@ TWO THINGS THAT WILL BREAK YOUR ANALYSIS IF YOU UNDO THEM
 
 
 ================================================================================
-WHAT THE DATA SAYS SO FAR (400 seeds)
+WHAT THE DATA SAYS (5000 seeds)
 ================================================================================
 Hypothesis: spawns are easier than random locations -- more trees, closer to
 good structures, farther from bad ones. Tested against control_land, with
-AUC standard error 0.0167 under the null, so |AUC-0.5| > 0.033 is 2-sigma.
+AUC standard error 0.0047 under the null, so |AUC-0.5| > 0.0094 is 2-sigma.
 
     feature                  vs uniform   vs land     z      verdict vs land
-    dist_tree_biome             0.346      0.504     +0.2    NO EFFECT
-    surface_y                   0.704      0.506     +0.4    NO EFFECT
-    dist_village                0.473      0.546     +2.8    FARTHER at spawn
-    dist_passive_structure      0.571      0.426     -4.4    closer at spawn
-    dist_hostile_structure      0.532      0.440     -3.6    CLOSER at spawn
-    dist_monument               0.522      0.392     -6.5    closer at spawn
-    dist_mineshaft              0.569      0.563     +3.8    farther at spawn
+    dist_tree_biome             0.357      0.504     +0.8    NO EFFECT
+    surface_y                   0.704      0.507     +1.4    NO EFFECT
+    dist_village                0.467      0.536     +7.6    FARTHER at spawn
+    dist_passive_structure      0.577      0.447    -11.3    closer at spawn
+    dist_hostile_structure      0.546      0.467     -7.1    CLOSER at spawn
+    dist_monument               0.527      0.415    -18.0    closer at spawn
+    dist_mineshaft              0.564      0.559    +12.6    farther at spawn
 
   (AUC < 0.5 means spawn values are smaller, i.e. closer.)
 
@@ -323,14 +325,14 @@ So against a land-matched control:
   * "closer to good structures" holds for the composite but NOT for villages,
     which are farther. The composite includes Shipwreck and Ocean Ruin.
   * "farther from bad structures" is REVERSED -- spawn is closer, driven by
-    Ocean Monument (z = -6.5).
+    Ocean Monument (z = -18.0).
 
 The mechanism behind all three looks like coastality. Water share of the
 surrounding 19x19 area:
 
-        spawn          mean 30.3%   median 26.3%
-        control        mean 43.7%   median 27.7%
-        control_land   mean 16.7%   median 11.6%
+        spawn          mean 28.0%   median 21.6%
+        control        mean 41.6%   median 25.5%
+        control_land   mean 17.1%   median 12.2%
 
 Spawn areas hold roughly twice the water of a random land area. That pulls them
 toward ocean structures (monuments, shipwrecks, ocean ruins) and away from
@@ -338,7 +340,8 @@ inland ones (villages) -- which is exactly the pattern above. If you want to
 test "is spawn better" independently of this, condition on water share or add a
 coastality-matched control.
 
-These are 400-seed numbers; re-run at 5000 to tighten them.
+These are the final 5000-seed numbers. Every verdict above matches the
+400-seed run; the z-scores grew with sqrt(n) and nothing changed sign.
 
 
 ================================================================================
@@ -436,14 +439,16 @@ DASHBOARD FEATURES
    both places.
 3. Spawn Density Heatmap: Proves the spawn algorithm heavily clusters near
    (0,0). Counts one row per SEED -- the old SELECT DISTINCT collapsed seeds
-   that share a spawn point, which at 300 seeds discarded 157 of them.
+   that share a spawn point. At 5000 seeds there are only 1012 distinct spawn
+   coordinates, so DISTINCT discarded 3988 seeds (80%), and it discarded them
+   hardest exactly where spawns cluster.
 4. Biome Diversity: Histogram showing unique biomes per spawn area.
 5. Water and Tree Share vs Distance from Area Centre: Two line panels over
    ring distance 0-9 from the area centre. LEFT, water share: spawn climbs
-   3.7% -> 34.1% from the centre chunk to the grid edge, against the land
-   control's 0% -> 19.5%. Spawn areas really are about twice as coastal.
-   RIGHT, tree-bearing share among LAND chunks only: flat at ~63% on every
-   ring and sitting on top of the land control's ~64%. That pair is the
+   2.1% -> 32.2% from the centre chunk to the grid edge, against the land
+   control's 0% -> 20.1%. Spawn areas really are about twice as coastal.
+   RIGHT, tree-bearing share among LAND chunks only: flat at 64.7-65.3% on
+   every ring, against the land control's 65.0-65.4%. That pair is the
    finding -- there is no tree bias at spawn; what looks like one is the water
    gradient on the left, and it vanishes once you condition on land.
    (Replaces the old 19x19 tree-heaviness heatmap, which averaged the water
